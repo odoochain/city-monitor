@@ -22,7 +22,7 @@
     "@langchain/openai": "^1.2.11",
     "compression": "^1.8.1",
     "cors": "^2.8.5",
-    "drizzle-orm": "^0.39",
+    "drizzle-orm": "^0.45",
     "exceljs": "^4.4.0",
     "express": "^5",
     "express-rate-limit": "^8.2.1",
