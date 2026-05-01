@@ -107,7 +107,7 @@ export async function createApp(options?: { skipScheduler?: boolean }) {
     { jobName: 'ingest-safety',       tableName: 'safety_reports', maxAgeSeconds: 600 },
 
     // Unified snapshots table (with type filter — values are concrete data source names)
-    { jobName: 'ingest-weather',      tableName: 'snapshots', maxAgeSeconds: 1800,    filter: { column: 'type', value: 'open-meteo' } },
+    { jobName: 'ingest-weather',      tableName: 'snapshots', maxAgeSeconds: 3600,    filter: { column: 'type', value: 'open-meteo' } },
     { jobName: 'ingest-transit',      tableName: 'snapshots', maxAgeSeconds: 900,     filter: { column: 'type', value: 'vbb-disruptions' } },
     { jobName: 'ingest-nina',         tableName: 'snapshots', maxAgeSeconds: 300,     filter: { column: 'type', value: 'bbk-nina' } },
     { jobName: 'ingest-pharmacies',   tableName: 'snapshots', maxAgeSeconds: 21600,   filter: { column: 'type', value: 'aponet' } },
@@ -167,7 +167,7 @@ export async function createApp(options?: { skipScheduler?: boolean }) {
   const jobs: ScheduledJob[] = [
     { name: 'ingest-feeds', schedule: '*/10 * * * *', handler: ingestFeeds, runOnStart: s('ingest-feeds') },
     { name: 'summarize-news', schedule: '5 */6 * * *', handler: summarizeNews, runOnStart: s('summarize-news'), dependsOn: ['ingest-feeds'] },
-    { name: 'ingest-weather', schedule: '*/30 * * * *', handler: ingestWeather, runOnStart: s('ingest-weather') },
+    { name: 'ingest-weather', schedule: '0 * * * *', handler: ingestWeather, runOnStart: s('ingest-weather') },
     { name: 'ingest-transit', schedule: '*/15 * * * *', handler: ingestTransit, runOnStart: s('ingest-transit') },
     { name: 'ingest-events', schedule: '0 */6 * * *', handler: ingestEvents, runOnStart: s('ingest-events') },
     { name: 'ingest-safety', schedule: '*/10 * * * *', handler: ingestSafety, runOnStart: s('ingest-safety') },

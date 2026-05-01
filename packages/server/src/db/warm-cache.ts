@@ -34,7 +34,7 @@ async function warmCity(db: Db, cache: Cache, cityId: string): Promise<void> {
   const tasks = [
     (async () => {
       const r = await loadWeather(db, cityId);
-      if (r) cache.set(CK.weather(cityId), r.data, 2160, r.fetchedAt);      // 30min cron + 20%
+      if (r) cache.set(CK.weather(cityId), r.data, 4320, r.fetchedAt);      // 1h cron + 20%
     })().catch((err) => log.error(`${cityId} weather failed`, err)),
 
     (async () => {

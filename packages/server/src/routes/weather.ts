@@ -31,7 +31,7 @@ export function createWeatherRouter(cache: Cache, db: Db | null = null) {
       try {
         const result = await loadWeather(db, city.id);
         if (result) {
-          cache.set(CK.weather(city.id), result.data, 1800, result.fetchedAt);
+          cache.set(CK.weather(city.id), result.data, 3600, result.fetchedAt);
           res.json({ data: result.data, fetchedAt: result.fetchedAt.toISOString() });
           return;
         }

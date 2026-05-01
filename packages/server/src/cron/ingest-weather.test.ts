@@ -37,6 +37,7 @@ const mockOpenMeteoResponse = {
 describe('ingest-weather', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it('fetches weather from Open-Meteo and writes to cache', async () => {
@@ -100,16 +101,43 @@ describe('ingest-weather', () => {
     });
   });
 
-  it('handles Open-Meteo API failure gracefully', async () => {
+  it('throws when Open-Meteo returns a non-OK response', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('', { status: 500 }),
+      new Response('bad request', { status: 400 }),
     );
 
     const cache = createCache();
     const ingest = createWeatherIngestion(cache);
-    await ingest(); // should not throw
 
-    const data = cache.get<WeatherData>('berlin:weather');
-    expect(data).toBeNull();
+    await expect(ingest()).rejects.toThrow(/400/);
+    expect(cache.get<WeatherData>('berlin:weather')).toBeNull();
+  });
+
+  describe('multi-city failure aggregation', () => {
+    beforeEach(() => {
+      vi.stubEnv('ACTIVE_CITIES', 'berlin,hamburg');
+    });
+
+    it('throws when any city fails, but successful cities still write to cache', async () => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        // Berlin (52.52) fails on the Open-Meteo forecast call;
+        // Hamburg (53.55) succeeds.
+        if (url.includes('api.open-meteo.com/v1/forecast') && url.includes('latitude=52.52')) {
+          return new Response('upstream error', { status: 502 });
+        }
+        return new Response(JSON.stringify(mockOpenMeteoResponse), { status: 200 });
+      });
+
+      const cache = createCache();
+      const ingest = createWeatherIngestion(cache);
+
+      await expect(ingest()).rejects.toThrow();
+
+      // Hamburg should have completed despite Berlin failing
+      expect(cache.get<WeatherData>('hamburg:weather')).toBeTruthy();
+      // Berlin should not have written
+      expect(cache.get<WeatherData>('berlin:weather')).toBeNull();
+    });
   });
 });

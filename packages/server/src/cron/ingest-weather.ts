@@ -47,12 +47,17 @@ interface OpenMeteoResponse {
 export function createWeatherIngestion(cache: Cache, db: Db | null = null) {
   return async function ingestWeather(): Promise<void> {
     const cities = getActiveCities();
+    const failures: string[] = [];
     for (const city of cities) {
       try {
         await ingestCityWeather(city, cache, db);
       } catch (err) {
         log.error(`${city.id} failed`, err);
+        failures.push(`${city.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
+    }
+    if (failures.length > 0) {
+      throw new Error(`weather ingestion failed — ${failures.join('; ')}`);
     }
   };
 }
@@ -73,7 +78,10 @@ async function ingestCityWeather(city: CityConfig, cache: Cache, db: Db | null):
     headers: { 'User-Agent': 'CityMonitor/1.0' },
   });
 
-  if (!response.ok) return;
+  if (!response.ok) {
+    const body = await response.text().catch(() => '');
+    throw new Error(`Open-Meteo forecast ${response.status} for ${city.id}: ${body.slice(0, 200)}`);
+  }
 
   const raw: OpenMeteoResponse = await response.json();
   const data = transformWeatherData(raw);
@@ -94,7 +102,7 @@ async function ingestCityWeather(city: CityConfig, cache: Cache, db: Db | null):
     }
   }
 
-  cache.set(CK.weather(city.id), data, 1800);
+  cache.set(CK.weather(city.id), data, 3600);
 
   if (db) {
     try {
@@ -145,7 +153,10 @@ export async function ingestCityAirQuality(city: CityConfig, cache: Cache): Prom
     headers: { 'User-Agent': 'CityMonitor/1.0' },
   });
 
-  if (!response.ok) return;
+  if (!response.ok) {
+    const body = await response.text().catch(() => '');
+    throw new Error(`Open-Meteo air-quality ${response.status} for ${city.id}: ${body.slice(0, 200)}`);
+  }
 
   const raw: AirQualityResponse = await response.json();
 
@@ -166,7 +177,7 @@ export async function ingestCityAirQuality(city: CityConfig, cache: Cache): Prom
     })),
   };
 
-  cache.set(CK.airQuality(city.id), airQuality, 1800);
+  cache.set(CK.airQuality(city.id), airQuality, 3600);
   log.info(`${city.id}: air quality updated (AQI: ${airQuality.current.europeanAqi})`);
 }
 
