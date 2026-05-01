@@ -68,27 +68,38 @@ async function fetchText(url: string): Promise<{ status: number; body: string }>
   return { status: response.status, body: await response.text() };
 }
 
-function checkOpenMeteoForecast(city: CityConfig) {
-  return runCheck('Open-Meteo forecast', async () => {
+function checkBrightSkyCurrent(city: CityConfig) {
+  return runCheck('BrightSky current_weather', async () => {
     const { lat, lon } = city.dataSources.weather;
-    const url = `https://api.open-meteo.com/v1/forecast`
-      + `?latitude=${lat}&longitude=${lon}`
-      + `&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,wind_direction_10m,uv_index,uv_index_clear_sky`
-      + `&hourly=temperature_2m,precipitation_probability,weather_code,uv_index`
-      + `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,sunrise,sunset,uv_index_max,uv_index_clear_sky_max`
-      + `&timezone=${encodeURIComponent(city.timezone)}`
-      + `&forecast_days=7`;
+    const url = `https://api.brightsky.dev/current_weather?lat=${lat}&lon=${lon}`;
     const { status, body } = await fetchJson(url);
-    const data = body as { current?: { temperature_2m?: number }; hourly?: { time?: unknown[] }; daily?: { time?: unknown[] } };
-    if (typeof data.current?.temperature_2m !== 'number') throw new Error('missing current.temperature_2m');
-    if (!Array.isArray(data.hourly?.time)) throw new Error('missing hourly.time array');
-    if (!Array.isArray(data.daily?.time)) throw new Error('missing daily.time array');
-    return {
-      status,
-      detail: `temp=${data.current.temperature_2m}°C, hourly=${data.hourly!.time!.length}, daily=${data.daily!.time!.length}`,
-    };
+    const data = body as { weather?: { temperature?: number; icon?: string } };
+    if (typeof data.weather?.temperature !== 'number') throw new Error('missing weather.temperature');
+    if (typeof data.weather?.icon !== 'string') throw new Error('missing weather.icon');
+    return { status, detail: `temp=${data.weather.temperature}°C, icon=${data.weather.icon}` };
   });
 }
+
+function checkBrightSkyForecast(city: CityConfig) {
+  return runCheck('BrightSky weather (7d)', async () => {
+    const { lat, lon } = city.dataSources.weather;
+    // Use the city's local date (matches what the adapter sends in production).
+    const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: city.timezone, year: 'numeric', month: '2-digit', day: '2-digit' });
+    const today = fmt.format(new Date());
+    const [y, m, d] = today.split('-').map(Number);
+    const last = new Date(Date.UTC(y!, m! - 1, d! + 6)).toISOString().slice(0, 10);
+    const url = `https://api.brightsky.dev/weather?lat=${lat}&lon=${lon}&date=${today}&last_date=${last}`;
+    const { status, body } = await fetchJson(url);
+    const data = body as { weather?: Array<{ timestamp?: string; temperature?: number }> };
+    if (!Array.isArray(data.weather)) throw new Error('missing weather array');
+    if (data.weather.length < 24) throw new Error(`too few entries (${data.weather.length}) for 7-day range`);
+    return { status, detail: `${data.weather.length} hourly entries` };
+  });
+}
+
+// BrightSky's /alerts endpoint exists and works, but production currently uses
+// DWD's JSONP /warnings.json directly (see fetchDwdAlerts in ingest-weather.ts).
+// `checkDwdWarnings` below is the canonical alerts probe.
 
 function checkOpenMeteoAirQuality(city: CityConfig) {
   return runCheck('Open-Meteo air-quality', async () => {
@@ -158,7 +169,8 @@ async function main(): Promise<void> {
   console.log(`Checking weather sources for ${city.name} (${city.id}, ${city.country}) — timeout ${TIMEOUT_MS}ms each\n`);
 
   const results = await Promise.all([
-    checkOpenMeteoForecast(city),
+    checkBrightSkyCurrent(city),
+    checkBrightSkyForecast(city),
     checkOpenMeteoAirQuality(city),
     checkDwdWarnings(city),
     checkDwdUv(city),

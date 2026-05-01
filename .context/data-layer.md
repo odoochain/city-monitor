@@ -24,7 +24,7 @@ Factory: `createCache()` returns a `Cache` object. Adapted from worldmonitor's R
 
 | Key pattern | TTL | Writer |
 |---|---|---|
-| `{cityId}:weather` | 1800s (30 min) | ingest-weather |
+| `{cityId}:weather` | 3600s (1 hr) | ingest-weather |
 | `{cityId}:transit:alerts` | 300s (5 min) | ingest-transit |
 | `{cityId}:events:upcoming` | 21600s (6h) | ingest-events |
 | `{cityId}:safety:recent` | 900s (15 min) | ingest-safety |

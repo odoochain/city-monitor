@@ -2,59 +2,74 @@
 
 ## Data Flow
 
-1. **Ingestion** (`packages/server/src/cron/ingest-weather.ts`) — Runs every 30 minutes. Fetches current conditions, hourly forecast (24h), and daily forecast (5 days) from Open-Meteo. For German cities (`country === 'DE'`), also fetches severe weather alerts from DWD. Writes to cache key `{cityId}:weather` (TTL 1800s) and persists to Postgres if DB connected.
+1. **Ingestion** (`packages/server/src/cron/ingest-weather.ts`) — Runs hourly. Routes per `city.dataSources.weather.provider`. For `'brightsky'` cities (today: Berlin, Hamburg), calls the adapter at `packages/server/src/lib/brightsky.ts`, which assembles `WeatherData` from BrightSky's `/current_weather` + `/weather` (7-day range) endpoints. For German cities, additionally fetches DWD severe-weather alerts and DWD UV index directly. Air quality is fetched alongside from Open-Meteo's separate `air-quality-api.open-meteo.com` host (not affected by the per-IP forecast quota). Writes to cache key `{cityId}:weather` (TTL 3600s) and persists to Postgres if DB connected.
 
-2. **API** (`packages/server/src/routes/weather.ts`) — `GET /api/:city/weather` returns cached data, falls back to Postgres, then returns empty structure `{ current: null, hourly: [], daily: [], alerts: [] }`.
+   If a city's `provider` has no adapter, the cron logs a warning and skips that city — DE cities continue to update normally. See "Adding a non-German city" below.
 
-3. **Frontend** (`packages/web/src/components/panels/WeatherPanel.tsx`) — Uses `useWeather()` hook (refetch 15 min). Displays current conditions with WMO weather code emoji/labels, hourly/daily forecasts, and alerts if present.
+2. **API** (`packages/server/src/routes/weather.ts`) — `GET /api/:city/weather` returns cached data, falls back to Postgres, then to an empty structure.
+
+3. **Frontend** (`packages/web/src/components/panels/WeatherPanel.tsx`) — Uses `useWeather()` (refetch 15 min). Renders current conditions via WMO weather code → emoji/label (`packages/web/src/lib/weather-codes.ts`).
 
 ## Data Sources
 
-### Open-Meteo (all cities)
+### BrightSky (German cities)
 
-- **Endpoint:** `https://api.open-meteo.com/v1/forecast`
-- **Auth:** None required (free tier, unlimited requests)
-- **Timeout:** 10s
-- **Query params:** latitude, longitude, current/hourly/daily field lists, timezone, `forecast_days=7`
-- **Returns:** Current weather (temp, humidity, feels-like, precipitation, wind, WMO weather code, UV index, UV index clear sky), hourly arrays (temp, precip probability, weather code, UV index), daily arrays (high/low, precip sum, sunrise/sunset, weather code, UV index max, UV index clear sky max)
+- **Endpoints**: `https://api.brightsky.dev/current_weather`, `/weather`, `/alerts`
+- **Auth**: None
+- **Rate limit**: No documented per-IP enforcement (public instance handles 2M+ req/day). Replaced Open-Meteo specifically because Render's shared egress IP exhausts Open-Meteo's 10k/day per-IP quota.
+- **Source data**: DWD station observations + MOSMIX forecast model — same primary source DWD itself uses.
+- **Adapter responsibilities** (in `lib/brightsky.ts`):
+  - `iconToWmoCode(icon)` — maps BrightSky's icon enum (`clear-day`, `partly-cloudy-day`, `cloudy`, `fog`, `wind`, `rain`, `snow`, `sleet`, `hail`, `thunderstorm`, plus night variants) to a representative WMO code present in `weather-codes.ts`. Throws on unknown icons to surface upstream enum changes loudly.
+  - `apparentTemp(temp, humidity, windKmh)` — Steadman formula. BrightSky doesn't provide apparent temperature; we compute it from `temperature` + `relative_humidity` + `wind_speed_10`.
+  - `rollUpDaily(hourly, lat, lon, timezone)` — BrightSky has no daily-aggregate endpoint. Buckets hourlies by **local date** (per `city.timezone`, not UTC), computes `high`/`low`/`precip`, picks the icon at the entry closest to 12:00 local. Sunrise/sunset come from `suncalc` (MIT, no API call); emitted as UTC ISO strings.
 
-### DWD — Deutscher Wetterdienst (German cities only)
+### DWD severe weather alerts (German cities)
 
-- **Endpoint:** `https://www.dwd.de/DWD/warnungen/warnapp/json/warnings.json`
-- **Format:** JSONP wrapper (`warnWetter.loadWarnings({...})`) — stripped before parsing
-- **Filtering:** Warnings keyed by region code; matched against city name in `regionName`. Only severity >= 2 surfaced (minor advisories skipped).
-- **Severity mapping:** 2 = severe, 3+ = extreme
+- **Endpoint**: `https://www.dwd.de/DWD/warnungen/warnapp/json/warnings.json` (JSONP-wrapped)
+- Direct call inside `ingest-weather.ts:fetchDwdAlerts`. Filters by `regionName.includes(city.name)`; severity ≥ 2 only. Could be replaced with BrightSky's cleaner JSON `/alerts` endpoint as a follow-up.
 
-### DWD UV Index (German cities only)
+### DWD UV index (German cities)
 
-- **Endpoint:** `https://opendata.dwd.de/climate_environment/health/alerts/uvi.json`
-- **Format:** JSON with `content` array of `{ city, forecast: { today, tomorrow, dayafter_to } }`
-- **Matching:** City name exact match (case-insensitive)
-- **Schedule:** Updated once daily (07:30 UTC); fetched alongside Open-Meteo weather every 30 min
-- **Data:** 3-day UV index forecast (WHO scale 0–11+), stored as `dwdUv` on `WeatherData`
+- **Endpoint**: `https://opendata.dwd.de/climate_environment/health/alerts/uvi.json`
+- 3-day forecast (today/tomorrow/dayAfter). Stored as `data.dwdUv`. Per-hour and per-day UV from the old Open-Meteo path are no longer populated post-migration; the dashboard's UV widget reads `dwdUv` instead.
+
+### Air quality (all cities)
+
+- **Endpoint**: `https://air-quality-api.open-meteo.com/v1/air-quality`
+- This is a separate Open-Meteo host with its own quota; still working today. Migrating off Open-Meteo for AQ is a future decision if the same shared-IP issue manifests here.
 
 ## Key Types
 
+`WeatherData` (in `@city-monitor/shared`) — the contract:
+
 ```typescript
-// Shared type from @city-monitor/shared
 interface WeatherData {
-  current: CurrentWeather;   // temp, feelsLike, humidity, precipitation, weatherCode, windSpeed, windDirection, uvIndex?, uvIndexClearSky?
-  hourly: HourlyForecast[];  // time, temp, precipProb, weatherCode, uvIndex?
-  daily: DailyForecast[];    // date, high, low, weatherCode, precip, sunrise, sunset, uvIndexMax?, uvIndexClearSkyMax?
-  alerts: WeatherAlert[];    // headline, severity ('extreme'|'severe'|'moderate'), description, validUntil
+  current: CurrentWeather;   // temp, feelsLike (Steadman), humidity, precipitation, weatherCode, windSpeed, windDirection
+  hourly: HourlyForecast[];  // time, temp, precipProb (null→0), weatherCode
+  daily: DailyForecast[];    // date (local), high, low, weatherCode, precip, sunrise, sunset (UTC ISO)
+  alerts: WeatherAlert[];    // populated by DWD direct call for German cities
   dwdUv?: DwdUvForecast;     // today, tomorrow, dayAfter (German cities only)
 }
 ```
 
-## Frontend Utilities
-
-- `packages/web/src/lib/weather-codes.ts` — Maps WMO weather codes to emoji + label. Handles clear/cloudy (0-3), fog (45-48), drizzle (51-57), rain (61-67), snow (71-77), showers (80-82), snow showers (85-86), thunderstorms (95-99). Fallback: "Unknown".
-- `packages/web/src/lib/uv-levels.ts` — Maps UV index to WHO level (low/moderate/high/veryHigh/extreme) and color. Floors fractional values.
-
-## Diagnostics
-
-When weather appears stale in production, run `npm run check:weather` (from `packages/server/`) to probe all four upstreams (Open-Meteo forecast, Open-Meteo air-quality, DWD warnings, DWD UV) end-to-end. Exits 0 if all return 200 + the expected shape, 1 if any fail. Add `-- --city hamburg` to probe Hamburg coordinates instead of Berlin. The script is not picked up by `vitest` / `turbo run test`.
+Optional fields `current.uvIndex`, `current.uvIndexClearSky`, `hourly[].uvIndex`, `daily[].uvIndexMax`, `daily[].uvIndexClearSkyMax` are no longer populated post-migration (BrightSky doesn't expose UV). Frontend reads `dwdUv` instead.
 
 ## DB Schema
 
-Unified `snapshots` table, type `open-meteo` — `data` JSONB contains `{ current, hourly, daily, alerts }`. No staleness guard on reads — `loadWeather()` always returns the latest row regardless of age. The frontend freshness system (TileFooter, 45-min threshold) handles stale display. Note: `dwdUv` is NOT persisted to DB — it only lives in the in-memory cache and is re-fetched on each cron run.
+Snapshot type `'open-meteo'` in `snapshots.type` is a **historical opaque key** retained to avoid a Drizzle migration touching 6 reference sites (`schema.ts` enum + `reads.ts` × 2 + `writes.ts` + `app.ts:110` freshness + `data-retention.ts`). The data inside is now BrightSky-sourced. Renaming is a follow-up.
+
+## Diagnostics
+
+When weather appears stale in production, run `npm run check:weather` (from `packages/server/`) to probe all upstreams (BrightSky × 3, Open-Meteo air-quality, DWD warnings, DWD UV) end-to-end. Exits 0 if all return 200 + the expected shape, 1 if any fail. Add `-- --city hamburg` for Hamburg.
+
+## Adding a non-German city
+
+Today only `'brightsky'` is implemented in the adapter dispatcher. To add e.g. London:
+
+1. Add the city config (`packages/server/src/config/cities/london.ts`) with `dataSources.weather.provider: 'weatherapi'` (or another global provider you add to the literal union in `shared/types.ts`).
+2. Implement an adapter `packages/server/src/lib/weatherapi.ts` exporting `fetchWeatherApiForecast(city: CityConfig): Promise<WeatherData>`. Mirror the BrightSky adapter shape: HTTP fetches, transforms to the same `WeatherData` contract, computes `feelsLike` if the upstream doesn't provide it, throws on non-OK.
+3. Add a branch in `ingest-weather.ts:createWeatherIngestion` for the new provider value.
+
+**Recommended provider for global coverage**: [WeatherAPI.com](https://www.weatherapi.com/pricing.aspx) — free 100k calls/month, **per-account API key** (not per-IP, so Render's shared egress is not an issue), includes current + forecast + AQ + alerts. The API key goes in `process.env.WEATHERAPI_KEY`. The check script (`check-weather-sources.ts`) should grow corresponding probes for any new provider.
+
+Until an adapter is added, the cron logs `no weather adapter for provider 'X' — see .context/weather.md to add one` once per cron run for that city and continues with other cities. DE cities are unaffected.
